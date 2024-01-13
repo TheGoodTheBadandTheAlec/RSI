@@ -18,6 +18,8 @@ contract RSIContract is Ownable {
     mapping(address => uint256) public rsiBalances;
     // Mapping to track the total USDC received by each user from sendUSDC function.
     mapping(address => uint256) public totalUsdcReceived;
+    // Mapping to track auto compound setting for each user.
+    mapping(address => bool) public autoCompoundEnabled;
 
     // Variables to keep track of total USDC deposited, withdrawn, and returned during burn.
     uint256 public totalUsdcDeposited;
@@ -26,6 +28,7 @@ contract RSIContract is Ownable {
     uint256 public totalUSDCBalance; 
     uint256 public allUSDCReceived;
     uint256 public totalRSIBurnt;
+    uint256 public totalRSIMinted;
 
     // Structure to represent a burn request with user address and RSI amount.
     struct BurnRequest {
@@ -72,7 +75,7 @@ contract RSIContract is Ownable {
 
     // External function allowing users to deposit USDC into the contract.
     function deposit(uint256 amount) external nonReentrant {
-        // Convert to user friendly amount.
+        // Convert from user friendly amount.
         amount = b(amount);
         // Transfer USDC from the user to the contract.
         require(usdcToken.transferFrom(msg.sender, address(this), amount), "USDC transfer failed");
@@ -84,13 +87,15 @@ contract RSIContract is Ownable {
         totalUSDCBalance = totalUsdcDeposited.sub(totalUsdcWithdrawn);
         // Mint 1 RSI for every 1 USDC deposited.
         rsiBalances[msg.sender] = rsiBalances[msg.sender].add(amount);
+        // Update Total RSI Minted All Time
+        totalRSIMinted = totalRSIMinted.add(amount);
         // Emit Deposit event for external monitoring.
         emit DepositMint(msg.sender, amount);
     }
 
     // External function allowing the owner to withdraw USDC from the contract.
     function ownerWithdrawal(uint256 amount) external onlyOwner nonReentrant {
-        // Convert to user friendly amount.
+        // Convert from user friendly amount.
         amount = b(amount);
         // Calculate the total USDC Balance.
         totalUSDCBalance = totalUsdcDeposited.sub(totalUsdcWithdrawn);
@@ -106,7 +111,7 @@ contract RSIContract is Ownable {
 
     // External function allowing the owner to deposit USDC into the contract.
     function ownerDeposit(uint256 amount) external onlyOwner nonReentrant {
-        // Convert to user friendly amount.
+        // Convert from user friendly amount.
         amount = b(amount);
         // Transfer USDC from the owner to the contract.
         require(usdcToken.transferFrom(owner(), address(this), amount), "Owner USDC transfer failed");
@@ -120,9 +125,14 @@ contract RSIContract is Ownable {
         processBurnQueue();
     }
 
+    // Function to allow users to set their auto compound setting.
+    function setAutoCompound(bool isEnabled) external {
+        autoCompoundEnabled[msg.sender] = isEnabled;
+    }
+
     // External function allowing users to send USDC to other users based on their RSI balances.
     function sendUSDC(uint256 amount) external nonReentrant {
-        // Convert to user friendly amount.
+        // Convert from user friendly amount.
         amount = b(amount);
         // Check if the requested amount is greater than zero.
         require(amount > 0, "Amount must be greater than 0");
@@ -130,17 +140,24 @@ contract RSIContract is Ownable {
         uint256 totalRSI = calculateTotalRSI();
 
         // Iterate through all users and transfer the corresponding amount of USDC.
-        address[] memory users = getUsersWithPositiveRSI(); // Access user ethereum addresses they used to deposit.
+        address[] memory users = getUsersWithPositiveRSI();
         for (uint256 i = 0; i < users.length; i++) {
             // Define user share of RSI.
-            uint256 userShareRSI = (rsiBalances[users[i]]).div(totalRSI); 
-            // Send to user.
-            require(usdcToken.transfer(users[i], userShareRSI.mul(amount)), "USDC transfer to user failed");
-            // Define amount sent to user (for analysis). 
+            uint256 userShareRSI = (rsiBalances[users[i]]).div(totalRSI);
+            // Define amount to send to user.
             uint256 usdcToTransfer = userShareRSI.mul(amount);
+
+            // If auto compound is enabled, initiate deposit for the user.
+            if (autoCompoundEnabled[users[i]]) {
+                depositForUser(users[i], usdcToTransfer);
+            } else {
+                // Otherwise, send USDC to the user's wallet.
+                require(usdcToken.transfer(users[i], usdcToTransfer), "USDC transfer to user failed");
+            }
+
             // Update the totalUsdcReceived for each user.
             totalUsdcReceived[users[i]] = totalUsdcReceived[users[i]].add(usdcToTransfer);
-            // Update the USDC received for everyone over the course of RSI's history. 
+            // Update the USDC received for everyone over the course of RSI's history.
             allUSDCReceived = allUSDCReceived.add(usdcToTransfer);
         }
 
@@ -148,9 +165,29 @@ contract RSIContract is Ownable {
         emit SendUSDC(msg.sender, amount);
     }
 
+    // Internal function to initiate compounding deposit for a specific user.
+    function depositForUser(address user, uint256 amount) internal {
+        // Convert from user friendly amount.
+        amount = b(amount);
+        // Transfer USDC from the user to the contract.
+        require(usdcToken.transferFrom(user, address(this), amount), "USDC transfer failed");
+        // Update user's USDC balance and total deposited amount.
+        usdcBalances[user] = usdcBalances[user].add(amount);
+        // Update totalUsdcDeposited.
+        totalUsdcDeposited = totalUsdcDeposited.add(amount);
+        // Update the total USDC Balance.
+        totalUSDCBalance = totalUsdcDeposited.sub(totalUsdcWithdrawn);
+        // Mint 1 RSI for every 1 USDC deposited.
+        rsiBalances[user] = rsiBalances[user].add(amount);
+        // Update Total RSI Minted All Time
+        totalRSIMinted = totalRSIMinted.add(amount);
+        // Emit Deposit event for external monitoring.
+        emit DepositMint(user, amount);
+    }
+
     // External function allowing users to initiate the burning of their RSI tokens.
     function burnRSI(uint256 amount) external nonReentrant {
-        // Convert to user friendly amount.
+        // Convert from user friendly amount.
         amount = b(amount);
         // Check if the user has sufficient RSI balance to burn.
         require(rsiBalances[msg.sender] >= amount, "Insufficient RSI balance");
@@ -171,30 +208,23 @@ contract RSIContract is Ownable {
         // Process the burn queue when there are sufficient funds.
         while (burnQueue.length > 0) {
             BurnRequest memory request = burnQueue[0];
-
             // Calculate the user's share of USDC based on the updated formula.
             uint256 userShareUSDC = (usdcBalances[request.user]);
-
             // Check if there are sufficient funds to process the request.
             if (userShareUSDC >= request.amount && userShareUSDC <= usdcToken.balanceOf(address(this))) {
-                // Subtract 'request.amount' from the user's USDC balance.
-                usdcBalances[request.user] = usdcBalances[request.user].sub(request.amount);
-                
                 // Transfer USDC to the user based on their RSI amount.
                 require(usdcToken.transfer(request.user, request.amount), "USDC transfer to user failed");
-
+                // Subtract 'request.amount' from the user's USDC balance.
+                usdcBalances[request.user] = usdcBalances[request.user].sub(request.amount);
                 // Update total withdrawn amount.
                 totalUsdcWithdrawn = totalUsdcWithdrawn.add(request.amount);
-
                 // Update the totalUsdcReturnedDuringBurn.
                 totalUsdcReturnedDuringBurn = totalUsdcReturnedDuringBurn.add(request.amount);
-                
                 // Remove the processed request from the queue.
                 for (uint256 i = 0; i < burnQueue.length - 1; i++) {
                     burnQueue[i] = burnQueue[i + 1];
                 }
                 burnQueue.pop();
-
                 // Emit BurnProcessComplete event for external monitoring.
                 emit BurnProcessComplete(request.user, request.amount, userShareUSDC);
             } else {
@@ -265,9 +295,19 @@ contract RSIContract is Ownable {
         return a(totalUSDCBalance);
     }
 
-    // External function to view RSI Balance.
+    // External function to view all USDC profits sent to users.
     function allUSDCSent() external view returns (uint256) {
         return a(allUSDCReceived);
+    }
+
+    // External function to view all RSI minted over time.
+    function allRSIMinted() external view returns (uint256) {
+        return a(totalRSIMinted);
+    }
+
+    // External function to view all RSI burnt over time.
+    function allRSIBurnt() external view returns (uint256) {
+        return a(totalRSIBurnt);
     }
 
     // External function to view count of users with positive RSI balance.
@@ -313,14 +353,11 @@ contract RSIContract is Ownable {
             addresses[i] = allUsers[i];
             userRSIBalances[i] = a(rsiBalances[allUsers[i]]);
             userUSDCBalances[i] = a(usdcBalances[allUsers[i]]);
-
             // Calculate user's share of RSI.
             uint256 totalRSI = calculateTotalRSI();
             userShareRSI[i] = a(totalRSI > 0 ? rsiBalances[allUsers[i]].div(totalRSI) : 0);
-
             // Calculate the amount of RSI the user has in the burn queue.
             rsiInBurnQueue[i] = a(getTotalRSIInBurnQueue(allUsers[i]));
-
             // Get the total USDC received by the user.
             totalUsdcReceivedByUser[i] = a(totalUsdcReceived[allUsers[i]]);
         }
@@ -341,17 +378,13 @@ contract RSIContract is Ownable {
         userAddress = user;
         rsiBalance = a(rsiBalances[user]);
         usdcBalance = a(usdcBalances[user]);
-
         // Calculate user's share of RSI.
         uint256 totalRSI = a(calculateTotalRSI());
         userShareRSI = a(totalRSI > 0 ? rsiBalance.div(totalRSI) : 0);
-
         // Calculate the amount of RSI the user has in the burn queue.
         rsiInBurnQueue = a(getTotalRSIInBurnQueue(user));
-
         // Get the total USDC received by the user.
         totalUsdcReceivedByUser = a(totalUsdcReceived[user]);
-
         return (userAddress, rsiBalance, usdcBalance, userShareRSI, rsiInBurnQueue, totalUsdcReceivedByUser);
     }
 
