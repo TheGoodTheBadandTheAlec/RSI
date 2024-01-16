@@ -408,15 +408,15 @@ contract RSIContract is Ownable {
 
     // External function to view the total amount of RSI a user has in the burn queue.
     function RSIInBurnQueue(address user) external view returns (uint256) {
-    uint256 totalRSI = 0;
+        uint256 totalRSI = 0;
 
-    for (uint256 i = 0; i < burnQueue.length; i++) {
-        if (burnQueue[i].user == user) {
-            totalRSI = totalRSI.add(burnQueue[i].amount);
+        for (uint256 i = 0; i < burnQueue.length; i++) {
+            if (burnQueue[i].user == user) {
+                totalRSI = totalRSI.add(burnQueue[i].amount);
+            }
         }
-    }
 
-    return a(totalRSI);
+        return a(totalRSI);
     }
 
 }
